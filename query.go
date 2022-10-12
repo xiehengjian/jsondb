@@ -1,4 +1,4 @@
-package simdb
+package jsondb
 
 import (
 	"fmt"

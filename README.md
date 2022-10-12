@@ -57,7 +57,7 @@ func main() {
 
   //creates a new Customer file inside the directory passed as the parameter to New()
   //if the Customer file already exist then insert operation will add the customer data to the array
-  err=driver.Insert(customer)
+  err=driver.Create(customer)
   if err!=nil {
     panic(err)
   }

@@ -1,11 +1,11 @@
-package simdb
+package jsondb
 
 import (
-	"os"
-	"strings"
-	"fmt"
-	"strconv"
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
 )
 
 func createDirIfNotExist(dir string) error {
@@ -16,12 +16,10 @@ func createDirIfNotExist(dir string) error {
 	return err
 }
 
-
 func mergeToExisting(array []interface{}, entity interface{}) ([]interface{}, error) {
 	array = append(array, entity)
 	return array, nil
 }
-
 
 // getNestedValue fetch nested value from node
 func getNestedValue(input interface{}, node string) (interface{}, error) {

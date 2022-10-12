@@ -1,68 +1,60 @@
 //Package db A simple library to persist structs in json file and perform queries and CRUD operations
-package simdb
+package jsondb
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
 var ErrRecordNotFound = errors.New("record not found")
 var ErrUpdateFailed = errors.New("update failed, no record(s) to update")
 
-//Entity any structure wanted to persist to json db should implement this interface function ID().
-//ID and Field will be used while doing update and delete operation.
-//ID() return the id value and field name that stores the id
-//
-//Sample Struct
-//	type Customer struct {
-//		CustID string `json:"custid"`
-//		Name string `json:"name"`
-//		Address string `json:"address"`
-//		Contact Contact
-//	}
-//	type Contact struct {
-//		Phone string `json:"phone"`
-//		Email string `json:"email"`
-//	}
-//	func (c Customer) ID() (jsonField string, value interface{}) {
-//		value=c.CustID
-//		jsonField="custid"
-//		return
-//	}
 type Entity interface {
-	ID() (jsonField string, value interface{})
+	TableName() string
 }
 
 // empty represents an empty result
 var empty interface{}
 
 // query describes a query
-type query struct {
+type QueryToken struct {
 	key, operator string
 	value         interface{}
 }
 
-//Driver contains all the state of the db.
-type Driver struct {
-	dir               string    //directory name to store the db
-	queries           [][]query // nested queries
-	queryIndex        int
-	queryMap          map[string]QueryFunc // contains query functions
-	jsonContent       interface{}          // copy of original decoded json data for further processing
-	errors            []error              // contains all the errors when processing
-	originalJSON      interface{}          // actual json when opening the json file
-	isOpened          bool
-	entityDealingWith interface{} // keeps the entity the driver is dealing with, field will maintain only the last entity inserted or updated or opened
-	mutex             *sync.Mutex
+//DB contains all the state of the db.
+type DB struct {
+	dir          string         //directory name to store the db
+	queries      [][]QueryToken // nested queries
+	queryIndex   int
+	queryMap     map[string]QueryFunc // contains query functions
+	jsonContent  interface{}          // copy of original decoded json data for further processing
+	errors       []error              // contains all the errors when processing
+	originalJSON interface{}          // actual json when opening the json file
+	isOpened     bool
+	mutex        *sync.Mutex
+	statement    Statement
+}
+
+type Statement struct {
+	Table string
+	Model Entity
+	Dest  Entity
+}
+
+func (db *DB) Model(value Entity) (tx *DB) {
+	db.statement.Model = value
+	return db
 }
 
 //New creates a new database driver. Accepts the directory name to store the db files.
 //If the passed directory not exist then will create one.
 //   driver, err:=db.New("customer")
-func New(dir string) (*Driver, error) {
-	driver := &Driver{
+func Open(dir string) (*DB, error) {
+	driver := &DB{
 		dir:      dir,
 		queryMap: loadDefaultQueryMap(),
 		mutex:    &sync.Mutex{},
@@ -75,10 +67,10 @@ func New(dir string) (*Driver, error) {
 //Once the file is open you can apply where conditions or get operation.
 //   driver.Open(Customer{})
 //Open returns a pointer to Driver, so you can chain methods like Where(), Get(), etc
-func (d *Driver) Open(entity Entity) *Driver {
+func (d *DB) Open(entity Entity) *DB {
 	d.queries = nil
-	d.entityDealingWith = entity
-	db, err := d.openDB(entity)
+	d.statement.Dest = entity
+	db, err := d.openDB()
 	d.originalJSON = db
 	d.jsonContent = d.originalJSON
 	d.isOpened = true
@@ -89,7 +81,7 @@ func (d *Driver) Open(entity Entity) *Driver {
 }
 
 //Errors will return errors encountered while performing any operations
-func (d *Driver) Errors() []error {
+func (d *DB) Errors() []error {
 	return d.errors
 }
 
@@ -106,34 +98,58 @@ func (d *Driver) Errors() []error {
 //			Email:"someone@gmail.com",
 //		},
 //	}
-//  err:=driver.Insert(customer)
-func (d *Driver) Insert(entity Entity) (err error) {
+//  err:=driver.Create(customer)
+func (d *DB) Create(entity Entity) (err error) {
 	d.mutex.Lock()
 	defer d.mutex.Unlock()
 
-	d.entityDealingWith = entity
-	err = d.readAppend(entity)
+	d.statement.Dest = entity
+	err = d.readAppend()
 	return
 }
 
 //Where builds a where clause to filter the records.
 //
 //   driver.Open(Customer{}).Where("custid","=","CUST1")
-func (d *Driver) Where(key, cond string, val interface{}) *Driver {
-	q := query{
-		key:      key,
-		operator: cond,
-		value:    val,
-	}
+func (d *DB) Where(query interface{}, args ...interface{}) *DB {
+	q := d.statement.BuildCondition(query, args...)
 	if d.queryIndex == 0 && len(d.queries) == 0 {
-		qq := []query{}
+		qq := []QueryToken{}
 		qq = append(qq, q)
 		d.queries = append(d.queries, qq)
 	} else {
-		d.queries[d.queryIndex] = append(d.queries[d.queryIndex], q)
+		d.queries[d.queryIndex] = append(d.queries[d.queryIndex], q...)
 	}
 
 	return d
+}
+
+func (stmt *Statement) BuildCondition(query interface{}, args ...interface{}) []QueryToken {
+	queryToken := []QueryToken{}
+	if s, ok := query.(string); ok {
+		// 无参数，或query中包含问号
+		if len(args) == 0 || (len(args) > 0 && strings.Contains(s, "?")) {
+			if strings.Contains(s, "OR") || strings.Contains(s, "or") {
+				return queryToken
+			}
+			if !strings.Contains(s, "AND") && !strings.Contains(s, "and") {
+				querySplites := strings.Split(s, "")
+				if len(querySplites) != 3 {
+					return queryToken
+				}
+				if querySplites[2] == "?" {
+					queryToken = append(queryToken, QueryToken{
+						key:      querySplites[0],
+						operator: querySplites[1],
+						value:    args[0],
+					})
+					return queryToken
+				}
+
+			}
+		}
+	}
+	return queryToken
 }
 
 //Get the result from the json db as an array. If no where condition then return all the data from json db
@@ -142,7 +158,7 @@ func (d *Driver) Where(key, cond string, val interface{}) *Driver {
 //   driver.Open(Customer{}).Where("name","=","sarouje").Get()
 //Get all records
 //   driver.Open(Customer{}).Get()
-func (d *Driver) Get() *Driver {
+func (d *DB) Get() *DB {
 	if !d.isDBOpened() {
 		return d
 	}
@@ -158,7 +174,7 @@ func (d *Driver) Get() *Driver {
 
 //First return the first record matching the condtion.
 //   driver.Open(Customer{}).Where("custid","=","CUST1").First()
-func (d *Driver) First() *Driver {
+func (d *DB) First() *DB {
 	if !d.isDBOpened() {
 		return d
 	}
@@ -173,12 +189,12 @@ func (d *Driver) First() *Driver {
 }
 
 //Raw will return the data in map type
-func (d *Driver) Raw() interface{} {
+func (d *DB) Raw() interface{} {
 	return d.jsonContent
 }
 
 //RawArray will return the data in map array type
-func (d *Driver) RawArray() []interface{} {
+func (d *DB) RawArray() []interface{} {
 	if aa, ok := d.jsonContent.([]interface{}); ok {
 		return aa
 	}
@@ -200,7 +216,7 @@ func (d *Driver) RawArray() []interface{} {
 //Get()
 //   var customers []Customer
 //   err:=driver.Open(Customer{}).Get().AsEntity(&customers)
-func (d *Driver) AsEntity(output interface{}) (err error) {
+func (d *DB) AsEntity(output interface{}) (err error) {
 	if !d.isDBOpened() {
 		return fmt.Errorf("should call Open() before calling AsEntity()")
 	}
@@ -228,9 +244,9 @@ func (d *Driver) AsEntity(output interface{}) (err error) {
 //   customerToUpdate.Name="Sony Arouje"
 //   err:=driver.Update(customerToUpdate)
 //Should not change the ID field when updating the record.
-func (d *Driver) Update(entity Entity) (err error) {
+func (d *DB) Update(entity Entity) (err error) {
 	d.queries = nil
-	d.entityDealingWith = entity
+	d.statement.Dest = entity
 	field, entityID := entity.ID()
 	couldUpdate := false
 	// entName, _ := d.getEntityName()
@@ -271,10 +287,10 @@ func (d *Driver) Update(entity Entity) (err error) {
 //		},
 //	}
 //  driver.Upsert(customer)
-func (d *Driver) Upsert(entity Entity) (err error) {
+func (d *DB) Upsert(entity Entity) (err error) {
 	err = d.Update(entity)
 	if errors.Is(err, ErrUpdateFailed) {
-		err = d.Insert(entity)
+		err = d.Create(entity)
 	}
 	return
 }
@@ -284,11 +300,11 @@ func (d *Driver) Upsert(entity Entity) (err error) {
 // 	   CustID:"CUST1",
 //   }
 //   err:=driver.Delete(custToDelete)
-func (d *Driver) Delete(entity Entity) (err error) {
+func (d *DB) Delete(entity Entity) (err error) {
 	d.queries = nil
-	d.entityDealingWith = entity
-	field, entityID := entity.ID()
-	entName, _ := d.getEntityName()
+	d.statement.Dest = entity
+	field, entityID := entity.ID
+	entName := d.statement.Dest.TableName()
 	couldDelete := false
 	newRecordArray := make([]interface{}, 0, 0)
 
